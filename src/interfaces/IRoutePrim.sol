@@ -16,6 +16,9 @@ interface IRoutePrim {
         address recipient;
         uint256 deadline;
         bytes permitSig;
+        /// @dev PancakeSwap V3 path: abi.encodePacked(tokenIn, fee, tokenOut) for single-hop.
+        ///      For routeNative, path must start with WBNB address.
+        bytes swapData;
     }
 
     struct AuthParams {
@@ -48,6 +51,7 @@ interface IRoutePrim {
     error InvalidSignature();
     error InsufficientOutput(uint256 expected, uint256 actual);
     error Unauthorized();
+    error SwapFailed();
 
     /*//////////////////////////////////////////////////////////////
                               FUNCTIONS

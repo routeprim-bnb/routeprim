@@ -3,6 +3,9 @@ pragma solidity ^0.8.25;
 
 import {IRoutePrim} from "./interfaces/IRoutePrim.sol";
 import {IPermit2} from "./interfaces/IPermit2.sol";
+import {IPancakeV3Router} from "./interfaces/IPancakeV3Router.sol";
+import {IERC20} from "./interfaces/IERC20.sol";
+import {IWBNB} from "./interfaces/IWBNB.sol";
 import {SignatureVerifier} from "./lib/SignatureVerifier.sol";
 import {EIP7702Helper} from "./lib/EIP7702Helper.sol";
 
@@ -14,7 +17,7 @@ import {EIP7702Helper} from "./lib/EIP7702Helper.sol";
 ///      Flow:
 ///        1. User signs an AuthParams off-chain (EIP-712)
 ///        2. Relayer calls `route()` on their behalf
-///        3. RoutePrim verifies the sig, pulls funds via Permit2, swaps/routes
+///        3. RoutePrim verifies the sig, pulls funds via Permit2, swaps via PancakeSwap V3
 ///        4. Output lands at `recipient` — no pre-approval UX needed
 contract RoutePrim is IRoutePrim {
     using SignatureVerifier for bytes32;
@@ -23,8 +26,13 @@ contract RoutePrim is IRoutePrim {
                                IMMUTABLES
     //////////////////////////////////////////////////////////////*/
 
-    IPermit2 public immutable PERMIT2;
-    bytes32 public immutable DOMAIN_SEPARATOR;
+    IPermit2         public immutable PERMIT2;
+    IPancakeV3Router public immutable SWAP_ROUTER;
+    IWBNB            public immutable WBNB;
+    bytes32          public immutable DOMAIN_SEPARATOR;
+
+    /// @dev Canonical WBNB address on BNB Chain
+    address internal constant WBNB_ADDR = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
 
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
@@ -33,15 +41,20 @@ contract RoutePrim is IRoutePrim {
     /// @notice Consumed nonces per signer
     mapping(address => mapping(uint256 => bool)) public usedNonces;
 
-    /// @notice EIP-7702 authority delegations
+    /// @notice EIP-7702 authority delegations registered via setAuthority()
     mapping(address => address) public authority;
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address _permit2) {
-        PERMIT2 = IPermit2(_permit2);
+    /// @param _permit2    Canonical Permit2 address (0x000000000022D473030F116dDEE9F6B43aC78BA3)
+    /// @param _swapRouter PancakeSwap V3 SmartRouter for the target chain
+    constructor(address _permit2, address _swapRouter) {
+        PERMIT2     = IPermit2(_permit2);
+        SWAP_ROUTER = IPancakeV3Router(_swapRouter);
+        WBNB        = IWBNB(WBNB_ADDR);
+
         DOMAIN_SEPARATOR = keccak256(
             abi.encode(
                 keccak256(
@@ -102,7 +115,18 @@ contract RoutePrim is IRoutePrim {
         _verifyAuth(auth);
         require(msg.value == params.amountIn, "RoutePrim: incorrect BNB amount");
 
-        amountOut = _swap(params);
+        // Wrap native BNB → WBNB so _doExactInput can treat it as ERC-20
+        WBNB.deposit{value: msg.value}();
+
+        // swapData must encode: abi.encodePacked(WBNB_ADDR, fee, tokenOut)
+        amountOut = _doExactInput(
+            WBNB_ADDR,
+            params.swapData,
+            params.recipient,
+            params.deadline,
+            params.amountIn,
+            params.amountOutMin
+        );
 
         if (amountOut < params.amountOutMin) {
             revert InsufficientOutput(params.amountOutMin, amountOut);
@@ -146,9 +170,46 @@ contract RoutePrim is IRoutePrim {
         usedNonces[auth.signer][auth.nonce] = true;
     }
 
-    /// @dev Stub — integrate PancakeSwap V3 / deBridge / custom aggregator here
-    function _swap(RouteParams calldata params) internal pure returns (uint256) {
-        // TODO: integrate swap router
-        return params.amountOutMin;
+    /// @dev ERC-20 swap entry point — delegates to _doExactInput.
+    function _swap(RouteParams calldata params) internal returns (uint256) {
+        return _doExactInput(
+            params.tokenIn,
+            params.swapData,
+            params.recipient,
+            params.deadline,
+            params.amountIn,
+            params.amountOutMin
+        );
+    }
+
+    /// @dev Executes a PancakeSwap V3 exactInput swap.
+    ///      Grants the router an exact-amount approval, executes the swap,
+    ///      then revokes residual allowance. On swap revert, allowance is
+    ///      also cleared before propagating the SwapFailed error.
+    function _doExactInput(
+        address tokenIn,
+        bytes memory path,
+        address recipient,
+        uint256 deadline,
+        uint256 amountIn,
+        uint256 amountOutMin
+    ) internal returns (uint256 amountOut) {
+        IERC20(tokenIn).approve(address(SWAP_ROUTER), amountIn);
+
+        try SWAP_ROUTER.exactInput(
+            IPancakeV3Router.ExactInputParams({
+                path:             path,
+                recipient:        recipient,
+                deadline:         deadline,
+                amountIn:         amountIn,
+                amountOutMinimum: amountOutMin
+            })
+        ) returns (uint256 out) {
+            IERC20(tokenIn).approve(address(SWAP_ROUTER), 0);
+            amountOut = out;
+        } catch {
+            IERC20(tokenIn).approve(address(SWAP_ROUTER), 0);
+            revert SwapFailed();
+        }
     }
 }
