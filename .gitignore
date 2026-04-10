@@ -1,0 +1,19 @@
+# Foundry
+cache/
+out/
+
+# Environment
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+
+# Dependencies
+lib/
+node_modules/
+
+# Coverage
+lcov.info
+coverage/
