@@ -23,6 +23,12 @@ contract RoutePrim is IRoutePrim {
     using SignatureVerifier for bytes32;
 
     /*//////////////////////////////////////////////////////////////
+                              VERSION
+    //////////////////////////////////////////////////////////////*/
+
+    string public constant VERSION = "1.0.0";
+
+    /*//////////////////////////////////////////////////////////////
                                IMMUTABLES
     //////////////////////////////////////////////////////////////*/
 
@@ -149,11 +155,17 @@ contract RoutePrim is IRoutePrim {
         emit AuthoritySet(auth.signer, _authority);
     }
 
+    /// @dev Reject accidental native BNB transfers; all BNB must come through routeNative().
+    receive() external payable {
+        revert("RoutePrim: use routeNative()");
+    }
+
     /*//////////////////////////////////////////////////////////////
                             INTERNAL LOGIC
     //////////////////////////////////////////////////////////////*/
 
     function _verifyAuth(AuthParams calldata auth) internal {
+        if (auth.signer == address(0)) revert InvalidSignature();
         if (block.timestamp > auth.deadline) revert DeadlineExpired();
         if (usedNonces[auth.signer][auth.nonce]) revert Unauthorized();
 

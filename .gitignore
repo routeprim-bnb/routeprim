@@ -10,8 +10,8 @@ out/
 .vscode/
 .idea/
 
-# Dependencies
-lib/
+# Dependencies (only root-level lib/, not src/lib/)
+/lib/
 node_modules/
 
 # Coverage
